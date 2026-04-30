@@ -1,0 +1,248 @@
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import Dataset, DataLoader
+import numpy as np
+from collections import Counter
+
+# 超参数
+MAX_VOCAB_SIZE = 10000
+MAX_SEQ_LENGTH = 100
+EMBEDDING_DIM = 128
+HIDDEN_DIM = 128
+NUM_LAYERS = 1
+BATCH_SIZE = 32
+EPOCHS = 3
+LEARNING_RATE = 0.001
+
+# 简单的文本数据集类
+class TextDataset(Dataset):
+    def __init__(self, texts, labels, vocab, max_seq_length):
+        self.texts = texts
+        self.labels = labels
+        self.vocab = vocab
+        self.max_seq_length = max_seq_length
+    
+    def __len__(self):
+        return len(self.texts)
+    
+    def __getitem__(self, idx):
+        text = self.texts[idx]
+        label = self.labels[idx]
+        
+        # 将文本转换为索引序列
+        indices = []
+        for word in text.split()[:self.max_seq_length]:
+            indices.append(self.vocab.get(word, self.vocab['<UNK>']))
+        
+        # 填充或截断序列
+        if len(indices) < self.max_seq_length:
+            indices += [self.vocab['<PAD>']] * (self.max_seq_length - len(indices))
+        else:
+            indices = indices[:self.max_seq_length]
+        
+        return torch.tensor(indices), torch.tensor(label)
+
+# 构建词汇表
+def build_vocab(texts, max_size=MAX_VOCAB_SIZE):
+    counter = Counter()
+    for text in texts:
+        counter.update(text.split())
+    
+    vocab = {'<PAD>': 0, '<UNK>': 1}
+    for word, _ in counter.most_common(max_size - 2):
+        vocab[word] = len(vocab)
+    
+    return vocab
+
+# LSTM分类模型
+class LSTMClassifier(nn.Module):
+    def __init__(self, vocab_size, embedding_dim, hidden_dim, num_layers, num_classes):
+        super(LSTMClassifier, self).__init__()
+        self.embedding = nn.Embedding(vocab_size, embedding_dim)
+        self.lstm = nn.LSTM(embedding_dim, hidden_dim, num_layers, batch_first=True)
+        self.fc = nn.Linear(hidden_dim, num_classes)
+    
+    def forward(self, x):
+        # x: (batch_size, seq_length)
+        embedded = self.embedding(x)  # (batch_size, seq_length, embedding_dim)
+        
+        # LSTM层
+        _, (hidden, _) = self.lstm(embedded)  # hidden: (num_layers, batch_size, hidden_dim)
+        
+        # 取最后一层的隐藏状态
+        output = self.fc(hidden[-1])  # (batch_size, num_classes)
+        
+        return output
+
+# 训练函数
+def train(model, train_loader, criterion, optimizer, device):
+    model.train()
+    total_loss = 0
+    correct = 0
+    total = 0
+    
+    for batch_idx, (data, target) in enumerate(train_loader):
+        data, target = data.to(device), target.to(device)
+        
+        optimizer.zero_grad()
+        output = model(data)
+        loss = criterion(output, target)
+        loss.backward()
+        optimizer.step()
+        
+        total_loss += loss.item()
+        _, predicted = torch.max(output.data, 1)
+        total += target.size(0)
+        correct += (predicted == target).sum().item()
+    
+    avg_loss = total_loss / len(train_loader)
+    accuracy = 100 * correct / total
+    
+    return avg_loss, accuracy
+
+# 验证函数
+def validate(model, val_loader, criterion, device):
+    model.eval()
+    total_loss = 0
+    correct = 0
+    total = 0
+    
+    with torch.no_grad():
+        for data, target in val_loader:
+            data, target = data.to(device), target.to(device)
+            output = model(data)
+            loss = criterion(output, target)
+            
+            total_loss += loss.item()
+            _, predicted = torch.max(output.data, 1)
+            total += target.size(0)
+            correct += (predicted == target).sum().item()
+    
+    avg_loss = total_loss / len(val_loader)
+    accuracy = 100 * correct / total
+    
+    return avg_loss, accuracy
+
+# 预测函数
+def predict(model, text, vocab, max_seq_length, device):
+    model.eval()
+    
+    # 将文本转换为索引序列
+    indices = []
+    for word in text.split()[:max_seq_length]:
+        indices.append(vocab.get(word, vocab['<UNK>']))
+    
+    if len(indices) < max_seq_length:
+        indices += [vocab['<PAD>']] * (max_seq_length - len(indices))
+    
+    input_tensor = torch.tensor(indices).unsqueeze(0).to(device)
+    
+    with torch.no_grad():
+        output = model(input_tensor)
+        probabilities = torch.softmax(output, dim=1)
+        _, predicted = torch.max(probabilities, 1)
+    
+    return predicted.item(), probabilities[0].tolist()
+
+# 生成模拟数据
+def generate_sample_data():
+    positive_texts = [
+        "this movie is amazing and wonderful",
+        "i love this film it is great",
+        "excellent movie highly recommend",
+        "beautiful story and great acting",
+        "fantastic film loved every minute",
+        "wonderful experience great movie",
+        "best movie i have ever seen",
+        "amazing performance must watch",
+        "loved it great story",
+        "brilliant film excellent direction"
+    ]
+    
+    negative_texts = [
+        "this movie is terrible and boring",
+        "i hate this film it is awful",
+        "poor movie not recommend",
+        "bad story and terrible acting",
+        "horrible film wasted time",
+        "terrible experience bad movie",
+        "worst movie i have ever seen",
+        "awful performance dont watch",
+        "hated it bad story",
+        "dull film poor direction"
+    ]
+    
+    texts = positive_texts + negative_texts
+    labels = [1] * len(positive_texts) + [0] * len(negative_texts)
+    
+    return texts, labels
+
+# 主函数
+def main():
+    # 设置设备
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"Using device: {device}")
+    
+    # 生成模拟数据
+    texts, labels = generate_sample_data()
+    print(f"Total samples: {len(texts)}")
+    
+    # 划分训练集和验证集
+    split = int(0.8 * len(texts))
+    train_texts, val_texts = texts[:split], texts[split:]
+    train_labels, val_labels = labels[:split], labels[split:]
+    
+    # 构建词汇表
+    vocab = build_vocab(train_texts)
+    print(f"Vocabulary size: {len(vocab)}")
+    
+    # 创建数据集和数据加载器
+    train_dataset = TextDataset(train_texts, train_labels, vocab, MAX_SEQ_LENGTH)
+    val_dataset = TextDataset(val_texts, val_labels, vocab, MAX_SEQ_LENGTH)
+    
+    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False)
+    
+    # 初始化模型
+    model = LSTMClassifier(
+        vocab_size=len(vocab),
+        embedding_dim=EMBEDDING_DIM,
+        hidden_dim=HIDDEN_DIM,
+        num_layers=NUM_LAYERS,
+        num_classes=2
+    ).to(device)
+    
+    # 定义损失函数和优化器
+    criterion = nn.CrossEntropyLoss()
+    optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
+    
+    # 训练模型
+    print("\nTraining model...")
+    for epoch in range(EPOCHS):
+        train_loss, train_acc = train(model, train_loader, criterion, optimizer, device)
+        val_loss, val_acc = validate(model, val_loader, criterion, device)
+        
+        print(f"Epoch {epoch+1}/{EPOCHS}")
+        print(f"Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.2f}%")
+        print(f"Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.2f}%")
+        print("-" * 50)
+    
+    # 测试预测
+    print("\nTesting predictions...")
+    test_texts = [
+        "this is a great movie i loved it",
+        "terrible film waste of time",
+        "amazing story and great acting",
+        "boring and dull not good"
+    ]
+    
+    for text in test_texts:
+        predicted, probs = predict(model, text, vocab, MAX_SEQ_LENGTH, device)
+        sentiment = "positive" if predicted == 1 else "negative"
+        print(f"Text: {text}")
+        print(f"Predicted: {sentiment} (positive: {probs[1]:.4f}, negative: {probs[0]:.4f})")
+        print()
+
+if __name__ == "__main__":
+    main()
